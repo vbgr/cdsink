@@ -1,2 +1,3 @@
 # cdsink
-Easy LakeHouse from CDC stream
+
+Easy LakeHouse from CDC stream.

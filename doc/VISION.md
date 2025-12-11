@@ -160,7 +160,7 @@ likely will require more specialized tools.
 
 ```mermaid
 graph LR
-    A[Relational Database (e.g., Postgres/MySQL)] --> B(Debezium - CDC Connector);
+    A["Relational Database (e.g., Postgres/MySQL)"] --> B(Debezium - CDC Connector);
     B --> C(Kafka/Redpanda - Message Queue);
     C --> D(cdsink - High-Performance Rust Sink);
     D --> E[Delta/Iceberg/Hudi on S3/Object Storage];

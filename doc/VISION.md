@@ -1,4 +1,4 @@
-# Overview
+# Project vision
 
 Motivation behind the `cdsink` project and its overview.
 
@@ -34,41 +34,54 @@ gap.
 We aim to deliver a high-performance tool that empowers data teams without the
 need for heavyweight infrastructure:
 
-* [Goal 1] Simplified Stream Ingestion: To provide a free, lightweight, and
+* [Core 1] Simplified Stream Ingestion: To provide a free, lightweight, and
   easy-to-maintain solution for streaming transactional data—such as database
   Change Data Capture (CDC) streams—directly into open table formats like Delta
   Lake, Apache Iceberg, or Apache Hudi with or without upserts.
 
-* [Goal 2] Optimal Resource Efficiency: To achieve the lowest possible hardware
+* [Core 2] Optimal Resource Efficiency: To achieve the lowest possible hardware
   and resource requirements through the utilization of high-performance
   technologies (like Rust) to drastically reduce cloud compute costs.
+
+  [Cap 3] Optional Data Catalog Integration: To support enterprise-grade data
+  governance and ecosystem compatibility (e.g., query engines like Athena or
+  Presto), cdsink will optionally provision and update table metadata in a
+  standard Data Catalog (like Hive Metastore or AWS Glue). This feature is
+  crucial for creating a seamless link between OLTP application schema
+  management tools and the analytical environment, ensuring the data warehouse
+  always reflects the latest, valid source schema.
+
+The project is not designed to replace Spark/Flink for large-scale distributed
+transformations. Its goal is to eliminate the need for these frameworks
+specifically for CDC ingestion, schema evolution, and light SQL-based
+standardization.
 
 ### Essential Modern Capabilities
 
 In conjunction with our primary goals, the following features are considered
 absolutely necessary for a modern, best-in-class data processing tool:
 
-* [Goal 3] Architectural Modularity: To feature a design that is open for
+* [Cap 1] Architectural Modularity: To feature a design that is open for
   seamless adoption of new data formats, sources, and targets via a flexible
   plugin architecture.
 
-* [Goal 4] In-Process Transformation: To provide an optional way to perform
+* [Cap 2] In-Process Transformation: To provide an optional way to perform
   reliable, SQL-based data transformations and quality checks on the fly during
   the ingestion process.
   
-* [Goal 5] Automatic Schema inferring and evolution: in many systems like
-  DataBricks, Arroy, RisingWave etc, schema evolution is a paid feature. But in
-  in real applications it's absolutely a must. Modern applications even of small
-  size contain usually 100-150-200 tables and during rapid development the
-  schema is constantly evolving. Because of that it's impractical to require
-  schema to be defined upfront and managed manually.
+* [Cap 3] Optional intgeration with a Data Catalog. While it's not a must for
+  all uses cases it's crucial for many of them. Automatic provisioning and
+  changin tables in a Data Catalog allows in the future to integrate schema
+  management tools from OLTP applications with OLAP databases, allowing raw
+  application data in the data wareshouse to have always latest valid schema.
 
-* [Goal 6] Dead Letter Queue. Failed records should not block pipeline, but
+* [Cap 4] Dead Letter Queue. Failed records should not block pipeline, but
   rather be recorded separately in a defined by user format (CSV/JSON,AVRO etc).
   This is just a standard industry practice.
 
-* [Goal 7] Integration with modern observability tools. Not a feature but a
+* [Cap 5] Integration with modern observability tools. Not a feature but a
   standard requirement.
+  
 
 ## Description
 
@@ -133,7 +146,7 @@ the optimal fit for this project because of the following reasons:
 
 ### Schema evolution
 
-As it was noted in [Goal 5] initial schema inferring and further schema
+As it was noted in [Core 3] initial schema inferring and further schema
 evolution is a must for an ingestion part of a modern Data Platform. From the
 other side it's not always easy to detect automatically whether a new column has
 been added or an old one has been renamed. Because of that the basic version

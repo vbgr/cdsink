@@ -13,10 +13,16 @@ thiserror = "2.0.17"
 
 [dev-dependencies]
 arrow-json = "57.1.0"
-fake = "4.4.0"
+criterion = { version = "0.8.1", features = ["html_reports"] }
+fake = { version = "4.4.0", features = ["chrono", "http", "ulid", "uuid", "derive"] }
 maplit = "1.0.2"
 pretty_assertions = "1.4.1"
+rand = "0.9.2"
 serde = "1.0.228"
 serde_derive = "1.0.228"
 serde_json = "1.0.147"
 uuid = "1.19.0"
+
+[[bench]]
+name = "bench_main"
+harness = false

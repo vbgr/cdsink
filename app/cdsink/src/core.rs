@@ -16,13 +16,17 @@
 
 #![allow(dead_code)]
 
+use std::fmt::{Display, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 
+use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use datafusion::arrow::array::ArrayBuilder;
 use datafusion::arrow::datatypes::{Field, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::error::DataFusionError;
+use datafusion::prelude::DataFrame;
 use thiserror::Error;
 use tracing::error;
 
@@ -60,8 +64,19 @@ pub enum ConversionError {
     #[error("Malformed payload: {0}")]
     InvalidFormat(String),
     /// The converter encountered a value that cannot be represented in the target Arrow type.
-    #[error("Value conversion failed: {0}")]
-    TypeMismatch(String),
+    #[error("Value out of range: {0}")]
+    OutOfRange(String),
+}
+
+#[derive(Error, Debug)]
+pub enum CatalogError {
+    /// Permission issues when accessing the source (e.g., Kafka ACLs or S3 Bucket policies).
+    #[error("Access denied: {0}")]
+    Access(String),
+    /// Underlying hardware or network failures.
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+    // TODO: Add more members
 }
 
 /// Errors specific to data ingestion and source-system interactions.
@@ -93,15 +108,15 @@ pub enum WriterError {
     /// Underlying hardware or network failures during the write phase.
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
-    /// Target system failed to acknowledge the write within the deadline.
-    #[error("Timeout error: {0}")]
-    Timeout(String),
     /// The data's schema does not match the existing table schema at the target.
     #[error("Schema mismatch: {0}")]
     Schema(String),
-    /// Physical storage limits reached (critical for local buffers or disk-based sinks).
-    #[error("Storage full")]
-    NoSpace,
+    /// DataFusion conversion error.
+    #[error("Failed to read DataFrame from batch: {0}")]
+    DataFusion(DataFusionError),
+    /// The data is malformed
+    #[error("Bad data: {0}")]
+    Data(std::io::Error, RecordBatch),
 }
 
 /// The top-level error type for the application, facilitating unified error handling
@@ -114,6 +129,8 @@ pub enum AppError {
     Converter(#[from] ConversionError),
     #[error("Writer error: {0}")]
     Writer(#[from] WriterError),
+    #[error("Catalog error: {0}")]
+    Catalog(#[from] CatalogError),
     #[error("To many errors")]
     ToManyErrors,
 }
@@ -122,6 +139,7 @@ pub enum AppError {
 ///
 /// Using an enum avoids unnecessary string allocations and parsing overhead
 /// for numerical keys while remaining flexible for string-based keys.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Partition {
     /// A string-based partition identifier (e.g., "region=us-east-1").
     Named(String),
@@ -129,7 +147,17 @@ pub enum Partition {
     Numeric(i64),
 }
 
+impl Display for Partition {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Partition::Named(name) => write!(f, "{}", name),
+            Partition::Numeric(num) => write!(f, "{}", num),
+        }
+    }
+}
+
 /// Metadata that describes the origin and destination context of a data batch.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceMetadata {
     /// The logical name of the target entity (e.g., the Delta Lake table name).
     pub table: String,
@@ -148,11 +176,21 @@ impl SourceMetadata {
 }
 
 /// Defines the specific location or cursor within a data source.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SourcePosition {
     /// A unique sequence number or offset in a stream (e.g., Kafka).
     Offset(i64),
     /// The unique identifier or path for a discrete object (e.g., S3 key).
     File(String),
+}
+
+impl Display for SourcePosition {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourcePosition::Offset(offset) => write!(f, "Offset({})", offset),
+            SourcePosition::File(path) => write!(f, "File({})", path),
+        }
+    }
 }
 
 /// A self-contained unit of work containing both data and its descriptive metadata.
@@ -163,11 +201,22 @@ pub struct SourceBatch {
     pub records: RecordBatch,
 }
 
+/// The container for data retrieved during a single fetch cycle.
+pub struct FetchResult {
+    /// Successfully parsed data ready for downstream processing.
+    /// Is `None` if the source had no new data during this cycle.
+    pub success: Option<SourceBatch>,
+
+    /// A collection of records that failed source-level validation or
+    /// parsing (e.g., malformed JSON). These are destined for the DLQ.
+    pub failure: Vec<DlqMessage>,
+}
+
 /// The core interface for ingestion components.
 #[async_trait]
 pub trait Reader {
     /// Retrieves the next available batch of data from the source.
-    async fn fetch(&self) -> Result<Option<SourceBatch>, ReaderError>;
+    async fn fetch(&self) -> Result<FetchResult, ReaderError>;
 
     /// Finalizes the processing of a batch in the source system (e.g., Commits Kafka offsets).
     async fn commit(&self, metadata: &[SourceMetadata]) -> Result<(), ReaderError>;
@@ -200,29 +249,33 @@ pub trait Writer: Send + Sync {
     /// This assumes the batch schema is already compatible with the
     /// table. If a schema mismatch is detected at the storage layer,
     /// it should return an error indicating a refresh is required.
-    async fn insert(&self, batch: &SourceBatch) -> Result<(), WriterError>;
+    async fn insert(&self, df: &DataFrame) -> Result<(), WriterError>;
 
     /// Merges a batch of records into the table based on primary keys.
     ///
     /// Performs an idempotent "upsert." This operation is more complex
     /// than `insert` as it requires matching existing records to
     /// determine whether to update or create.
-    async fn upsert(&self, batch: &SourceBatch) -> Result<(), WriterError>;
+    async fn upsert(&self, df: &DataFrame) -> Result<(), WriterError>;
 }
 
-/// A handle to a storage-layer table resource.
+/// A high-level interface for a storage backend or data catalog.
 ///
-/// The `Table` trait is responsible for bootstrapping the connection
-/// to the underlying storage and producing a `Writer`. It acts as
-/// the entry point for the pipeline to interact with a specific destination.
+/// The `Database` trait is responsible for managing table lookups and
+/// bootstrapping the connection to specific storage locations (e.g., S3 buckets,
+/// SQL databases). It serves as the factory for creating table-specific `Writer`s.
 #[async_trait]
-pub trait Table {
-    /// Instantiates a `Writer` for this table.
+pub trait Database: Send + Sync {
+    /// Instantiates a `Writer` for a specific table identified by its name.
     ///
-    /// This involves loading table metadata, initializing connection
-    /// pools, and verifying that the target path exists and is
-    /// accessible.
-    async fn get_writer(&self) -> Result<Box<dyn Writer>, WriterError>;
+    /// This operation typically performs the following:
+    /// 1. Resolves the table name to a physical path or connection string.
+    /// 2. Loads table metadata (e.g., Delta Log or Iceberg Metadata).
+    /// 3. Initializes connection pools and validates access permissions.
+    ///
+    /// ### Arguments
+    /// * `metadata` - The source metadata containing the table name and partition information used to resolve the correct writer.
+    async fn get_writer(&self, metatada: &SourceMetadata) -> Result<Box<dyn Writer>, WriterError>;
 }
 
 /// Bridges raw binary data to Arrow memory structures.
@@ -302,4 +355,55 @@ pub trait DlqWriter: Send + Sync {
     /// If the `DQLWriter` itself fails, the pipeline may need to halt to prevent
     /// data loss (silent failures).
     async fn write(&self, dl: Vec<DlqMessage>) -> Result<(), AppError>;
+}
+
+/// Defines the supported input sources for the data pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReaderType {
+    /// Consumes data from an Apache Kafka topic.
+    Kafka,
+    /// Reads data from the standard input stream (useful for piping data or local testing).
+    StdIn,
+}
+
+/// Defines the expected format and structure of the incoming data records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConverterType {
+    /// Binary format using Apache Avro serialization with a specific schema.
+    AvroRecord,
+    /// Standard JSON format (no explicit schema attached to each record).
+    JsonRecord,
+    /// Self-describing JSON records that include schema definitions (e.g., JSON Schema).
+    JsonRecordSchema,
+}
+
+/// Defines the supported storage backends or sinks for data persistence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriterType {
+    /// Writes data to a Delta Lake table with ACID transaction support.
+    DeltaLake,
+    /// Writes data to an Apache Iceberg table for high-performance analytics.
+    Iceberg,
+    /// Outputs the processed records to the standard output stream (useful for debugging).
+    StdOut,
+}
+
+/// A metadata registry for managing table definitions and schema versions.
+///
+/// The `Catalog` acts as a source of truth for downstream consumers (like Athena,
+/// Spark, or Trino) to discover the current structure of tables managed by the pipeline.
+#[async_trait]
+pub trait Catalog: Send + Sync {
+    /// Registers a new schema version for a table in the catalog.
+    ///
+    /// This should be called whenever a schema evolution occurs (e.g., after an `alter`
+    /// call on a `Writer`). It ensures that the external catalog (e.g., AWS Glue,
+    /// Hive Metastore) is synchronized with the physical storage.
+    ///
+    /// ### Arguments
+    /// * `name` - The unique identifier of the table.
+    /// * `hash` - A precalculated hash of the `arrow::datatypes::Schema` representing
+    ///            a specific structural version.
+    /// * `schema` - The Arrow schema to be persisted in the catalog's metadata.
+    async fn register(&self, name: &str, hash: u64, schema: &Schema) -> Result<(), CatalogError>;
 }

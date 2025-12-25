@@ -1,5 +1,4 @@
 services:
-
   db:
     image: postgres:16
     command: |
@@ -13,23 +12,23 @@ services:
       -c logging_collector=on
       -c wal_level=logical
     ports:
-    - 40010:5432
+      - 40010:5432
     env_file:
-    - .env
+      - .env
     volumes:
-    - db:/var/lib/postgresql/data
-    - ./bin/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+      - db:/var/lib/postgresql/data
+      - ./bin/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
 
   s-1:
     image: apicurio/apicurio-registry-sql:2.4.4.Final
     restart: on-failure
     ports:
-    - 18000:8080
+      - 18000:8080
     env_file:
-    - .env
+      - .env
 
   b-1:
-    image: apache/kafka:3.8.0
+    image: apache/kafka:4.1.1
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller

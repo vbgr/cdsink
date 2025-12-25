@@ -1,0 +1,5 @@
+[workspace]
+resolver = "3"
+members = ["app/avroarrow",
+    "app/cdsink", "app/jsonarrow", "app/lakekeeper", "app/schemareg",
+]

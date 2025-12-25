@@ -1,6 +1,7 @@
 //! Channel utilities for efficient batch processing.
 
 use tokio::sync::mpsc;
+use tracing::instrument;
 
 /// Asynchronously waits for at least one message, then non-blockingly drains
 /// the channel up to the specified limit.
@@ -47,6 +48,7 @@ pub async fn recv_batch<T>(
 /// ### Returns
 /// * `Ok(Vec<T>)` - A batch of available items (may be empty).
 /// * `Err(TryRecvError::Disconnected)` - If the channel is closed.
+#[instrument(skip(rx))]
 pub fn try_recv_batch<T>(
     rx: &mut mpsc::Receiver<T>,
     limit: usize,
@@ -70,4 +72,40 @@ pub fn try_recv_batch<T>(
     }
 
     Ok(batch)
+}
+
+/// Sends a collection of items into a channel, consuming them.
+///
+/// Returns `Ok(())` if all items were sent.
+/// Returns `Err(_)` if the receiver has dropped, indicating the pipeline
+/// should initiate a graceful shutdown.
+pub async fn send_all<T>(
+    tx: &mpsc::Sender<T>,
+    items: Vec<T>,
+) -> Result<(), mpsc::error::SendError<T>> {
+    for item in items {
+        tx.send(item).await?;
+    }
+    Ok(())
+}
+
+/// Creates a fixed number of MPSC channels with a specified capacity.
+///
+/// Returns a tuple containing:
+/// 1. A Vector of Senders (to be kept by the dispatcher/main loop).
+/// 2. A Vector of Receivers (to be moved into worker tasks).
+pub fn make_channels<T>(
+    capacity: usize,
+    len: usize,
+) -> (Vec<mpsc::Sender<T>>, Vec<mpsc::Receiver<T>>) {
+    let mut txs = Vec::with_capacity(len);
+    let mut rxs = Vec::with_capacity(len);
+
+    for _ in 0..len {
+        let (tx, rx) = mpsc::channel::<T>(capacity);
+        txs.push(tx);
+        rxs.push(rx);
+    }
+
+    (txs, rxs)
 }
